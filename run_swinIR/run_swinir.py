@@ -4,13 +4,19 @@ import glob
 import numpy as np
 from collections import OrderedDict
 import os
+import sys
 import torch
 import random
 random.seed(42)
 
+current_dir = os.path.dirname(os.path.abspath(__file__))
+# Get the parent directory's path
+parent_dir = os.path.dirname(current_dir)
+sys.path.insert(0, parent_dir)
 
 from models.swinir import SwinIR as net
 from utils import swinir_utils as util
+from torchinfo import summary
 
 def process_and_evaluate(
     args,
@@ -41,7 +47,7 @@ def process_and_evaluate(
 
     # 3) Collect all image paths
     all_paths = sorted(glob.glob(os.path.join(folder, "*")))
-
+    print(f"found {len(all_paths)} images in {folder}")
     if sample_k is not None:
         # randomly pick `sample_k` images (without replacement)
         sampled = random.sample(all_paths, sample_k)
@@ -116,20 +122,113 @@ def process_and_evaluate(
     else:
         ave_psnr = ave_ssim = None
 
-    print(f"{ave_psnr:.2f}, {ave_ssim:.4f}")
+    print(f"{ave_psnr}, {ave_ssim}")
 
     return test_results
 
 
+def process(
+    args,
+    window_size,
+    mech,
+    device,
+    num_landmarks=None,
+    iters=None,
+    sample_k=None,
+):
+    """
+    Common routine for both 'original' and 'pnp_nystra' mechanisms.
+    - mech: 'original' or 'pnp_nystra'
+    - For mech == 'original', num_landmarks/iters are ignored (we hardcode 16,1).
+    - For mech == 'pnp_nystra', you must pass (num_landmarks, iters).
+    - sample_k: if not None, randomly sample `sample_k` image paths from the folder.
+    """
+
+    # 1) Setup folder, save_dir, border, and make sure the directory exists
+    folder, save_dir, border, window_size = setup(args, window_size)
+    os.makedirs(save_dir, exist_ok=True)
+
+
+    # 3) Collect all image paths
+    all_paths = sorted(glob.glob(os.path.join(folder, "*")))
+    print(f"found {len(all_paths)} images in {folder}")
+
+    if sample_k is not None:
+        # randomly pick `sample_k` images (without replacement)
+        sampled = random.sample(all_paths, sample_k)
+        paths_to_process = sorted(sampled)
+    else:
+        paths_to_process = all_paths
+
+    # 4) Iterate over each selected image
+    for path in paths_to_process:
+        # 4.1) Read LQ + GT
+        # imgname, img_lq, img_gt = get_image_pair(args, path)  # HWC‐BGR, float32
+        (imgname, imgext) = os.path.splitext(os.path.basename(path))
+        img_lq = cv2.imread(f'{path}', cv2.IMREAD_COLOR).astype(np.float32) / 255.
+
+        # 4.2) Convert LQ to CHW‐RGB tensor
+        if img_lq.ndim == 3 and img_lq.shape[2] == 3:
+            # BGR → RGB
+            img_lq = img_lq[:, :, [2, 1, 0]]
+        img_lq = np.transpose(img_lq, (2, 0, 1))              # HWC → CHW
+        img_lq = torch.from_numpy(img_lq).float().unsqueeze(0).to(device)  # 1×C×H×W
+
+        # 4.3) Pad so H & W are multiples of window_size
+        _, _, h_old, w_old = img_lq.size()
+        h_pad = (h_old // window_size + 1) * window_size - h_old
+        w_pad = (w_old // window_size + 1) * window_size - w_old
+
+        # vertical flip pad, then trim
+        img_lq = torch.cat([img_lq, torch.flip(img_lq, [2])], dim=2)[:, :, : h_old + h_pad, :]
+        # horizontal flip pad, then trim
+        img_lq = torch.cat([img_lq, torch.flip(img_lq, [3])], dim=3)[:, :, :, : w_old + w_pad]
+
+        # 4.4) Build model according to mech
+        img_size = img_lq.size(-1)  # after padding, height == width
+        print(f"Building model for {imgname} with mech={mech}, window_size={window_size}, img_size={img_size}")
+        if mech == "original":
+            # hardcode num_landmarks=16, iters=1 (garbage values)
+            model = define_model(args, mech, 16, 1, window_size, img_size)
+            print("Model structure:")
+            summary(model, (1, 3, img_size, img_size))
+        else:
+            # 'pnp_nystra' mech: use the passed-in num_landmarks & iters
+            model = define_model(args, mech, num_landmarks, iters, window_size, img_size)
+            print("Model structure:")
+            summary(model, (1, 3, img_size, img_size))
+
+        model.eval()
+        model = model.to(device)
+        print(f"Moved model to {device}.Processing {imgname}...")
+
+        # 4.5) Inference
+        with torch.no_grad():
+            output = test(img_lq, model, args, window_size)[0]  # we only need the first returned value
+
+        # 4.6) Crop model output back to (h_old * scale, w_old * scale)
+        output = output[..., : h_old * args.scale, : w_old * args.scale]
+
+        # 4.7) Convert to NumPy uint8 BGR and save
+        output_np = output.data.squeeze().float().cpu().clamp_(0, 1).numpy()
+        if output_np.ndim == 3:
+            # CHW‐RGB → HWC‐BGR
+            output_np = np.transpose(output_np[[2, 1, 0], :, :], (1, 2, 0))
+        output_np = (output_np * 255.0).round().astype(np.uint8)
+        cv2.imwrite(f"{save_dir}/{imgname}_SwinIR.png", output_np)
+
+    return "success"
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--scale', type=int, default=1, help='scale factor: 1, 2, 3, 4, 8') # 1 for dn and jpeg car
+    parser.add_argument('--scale', type=int, default=2, help='scale factor: 1, 2, 3, 4, 8') # 1 for dn and jpeg car
     parser.add_argument('--noise', type=int, default=15, help='noise level: 15, 25, 50')
     parser.add_argument('--jpeg', type=int, default=40, help='scale factor: 10, 20, 30, 40')
     parser.add_argument('--model_path', type=str,
-                        default='model_zoo/swinir/001_classicalSR_DIV2K_s48w8_SwinIR-M_x2.pth')
-    parser.add_argument('--folder_lq', type=str, default=None, help='input low-quality test image folder')
-    parser.add_argument('--folder_gt', type=str, default=None, help='input ground-truth test image folder')
+                        default=r".\model_weights\x2.pth")
+    parser.add_argument('--folder_lq', type=str, default=r".\input_images", help='input low-quality test image folder')
+    parser.add_argument('--folder_gt', type=str, default=r".\output_images", help='input ground-truth test image folder')
     parser.add_argument('--tile', type=int, default=None, help='Tile size, None for no tile during testing (testing as a whole)')
     parser.add_argument('--tile_overlap', type=int, default=32, help='Overlapping of different tiles')
     parser.add_argument('--mech', type = str, default = 'original')
@@ -139,10 +238,10 @@ def main():
     args = parser.parse_args()
 
     device = args.device
-
+    print("Using device: ", device)
     if args.mech == "original":
         for window_size in [32]:
-            process_and_evaluate(
+            print(process(
                 args=args,
                 window_size=window_size,
                 mech="original",
@@ -151,13 +250,13 @@ def main():
                 num_landmarks=None,
                 iters=None,
                 sample_k=args.sample_k
-            )
+            ))
 
     elif args.mech == "pnp_nystra":
         for window_size in [32]:
             for num_landmarks in [16]:
                 for iters in [2]:
-                    process_and_evaluate(
+                    print(process(
                         args=args,
                         window_size=window_size,
                         mech="pnp_nystra",
@@ -165,7 +264,7 @@ def main():
                         num_landmarks=num_landmarks,
                         iters=iters,
                         sample_k= args.sample_k
-                    )
+                    ))
 
 
 def define_model(args, mech, num_landmarks, iters, window_size, img_size):
@@ -173,13 +272,13 @@ def define_model(args, mech, num_landmarks, iters, window_size, img_size):
                 img_range=1., depths=[6, 6, 6, 6, 6, 6], embed_dim=180, num_heads=[6, 6, 6, 6, 6, 6],
                 mlp_ratio=2, upsampler='pixelshuffle', resi_connection='1conv')
     param_key_g = 'params'
-
+    print('Loading model from %s' % args.model_path)
     
     pretrained_model = torch.load(args.model_path)
     state_dict = pretrained_model[param_key_g] if param_key_g in pretrained_model.keys() else pretrained_model
 
     model_state_dict = model.state_dict()
-
+    print('Model state_dict keys length:', len(model_state_dict))
     filtered_state_dict = {}
 
     for key, value in state_dict.items():
@@ -195,7 +294,7 @@ def define_model(args, mech, num_landmarks, iters, window_size, img_size):
 
 def setup(args, window_size):
     save_dir = f'results/swinir_x{args.scale}'
-    folder = args.folder_gt
+    folder = args.folder_lq
     border = args.scale
     window_size = window_size
 

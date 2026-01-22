@@ -10,7 +10,7 @@ import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint as checkpoint
-from timm.models.layers import DropPath, to_2tuple, trunc_normal_
+from timm.layers import DropPath, to_2tuple, trunc_normal_
 from einops import rearrange
 
 
@@ -128,7 +128,7 @@ class WindowAttention(nn.Module):
         B_, N, C = x.shape
         qkv = self.qkv(x).reshape(B_, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple)
-
+        # print("Q, K, V shapes:", q.shape, k.shape, v.shape)
         q = q * self.scale
 
         attn = (q @ k.transpose(-2, -1))
@@ -144,23 +144,30 @@ class WindowAttention(nn.Module):
     def extra_repr(self) -> str:
         return f'dim={self.dim}, window_size={self.window_size}, num_heads={self.num_heads}'
 
+class IterativePsuedoInverse(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x, iters = 6):
+        device = x.device
+
+        abs_x = torch.abs(x)
+        col = abs_x.sum(dim = -1)
+        row = abs_x.sum(dim = -2)
+        z = torch.transpose(x, -1, -2) / (torch.max(col) * torch.max(row) + 1e-15)
+
+        I = torch.eye(x.shape[-1], device = device).unsqueeze(0)
+        # I = rearrange(I, 'i j -> () i j')
+
+        for _ in range(iters):
+            xz = torch.matmul(x, z)
+            z = torch.matmul(0.25 * z, (13 * I - torch.matmul(xz, (15 * I - torch.matmul(xz, (7 * I - xz))))))
+        return z
+
 
 class PnPNystraAttention(nn.Module):
-    r""" Proposed approximation of window based multi-head self attention (W-MSA) module.
-    It supports both of shifted and non-shifted window.
-
-    Args:
-        dim (int): Number of input channels.
-        window_size (tuple[int]): The height and width of the window.
-        num_heads (int): Number of attention heads.
-        qkv_bias (bool, optional):  If True, add a learnable bias to query, key, value. Default: True
-        qk_scale (float | None, optional): Override default qk scale of head_dim ** -0.5 if set
-        attn_drop (float, optional): Dropout ratio of attention weight. Default: 0.0
-        proj_drop (float, optional): Dropout ratio of output. Default: 0.0
-    """
-
-    def __init__(self, num_landmarks, iters, dim, window_size, num_heads, qkv_bias=True, qk_scale=None, attn_drop=0., proj_drop=0.):
-
+    def __init__(self, num_landmarks, iters, dim, window_size, num_heads, qkv_bias=True, qk_scale=None, attn_drop=0.0,
+                 proj_drop=0.0):
         super().__init__()
         self.dim = dim
         self.window_size = window_size  # Wh, Ww
@@ -172,32 +179,17 @@ class PnPNystraAttention(nn.Module):
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
 
+        self.psuedo_inv = IterativePsuedoInverse()
+
         self.proj_drop = nn.Dropout(proj_drop)
 
         self.activ = ExpLinearAfterThreshold()
 
         self.num_landmarks = num_landmarks
         self.iters = iters
-    
-    def moore_penrose_iter_pinv(self, x, iters = 6):
-        device = x.device
-
-        abs_x = torch.abs(x)
-        col = abs_x.sum(dim = -1)
-        row = abs_x.sum(dim = -2)
-        z = rearrange(x, '... i j -> ... j i') / (torch.max(col) * torch.max(row) + 1e-15)
-
-        I = torch.eye(x.shape[-1], device = device)
-        I = rearrange(I, 'i j -> () i j')
-
-        for _ in range(iters):
-            xz = x @ z
-            z = 0.25 * z @ (13 * I - (xz @ (15 * I - (xz @ (7 * I - xz)))))
-
-        return z
+        self.verbose = False
 
     def forward(self, x):
-
         """
         Args:
             x: input features with shape of (num_windows*B, N, C)
@@ -207,21 +199,45 @@ class PnPNystraAttention(nn.Module):
         window_size = self.window_size[0]
         num_landmarks = self.num_landmarks
         iters = self.iters
-
+        # print(f"input x shape: {x.shape}, window_size: {window_size}, num_landmarks: {num_landmarks}, iters: {iters}")
         qkv = self.qkv(x).reshape(B_, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple)
 
         q = q * self.scale
 
         h, w = closest_square_factors(num_landmarks)
+        # print("h, w:", h, w)
+        # print("Q shape before reshape:", q.shape)
+        q2 = q.reshape(B_ * self.num_heads, window_size, window_size, self.dim // self.num_heads).permute(0, 3, 1, 2)
+        # print("Input shape for Adaptive Avg Pooling of Q:", q2.shape)
+        # q_m = F.adaptive_avg_pool2d(
+        #     q2,
+        #     output_size=(h, w)
+        # )
 
-        q_m = F.adaptive_avg_pool2d(q.reshape(B_*self.num_heads, window_size, window_size, self.dim//self.num_heads).permute(0, 3, 1, 2), output_size = (h, w)).permute(0, 2, 3, 1).reshape(B_, self.num_heads, num_landmarks, self.dim//self.num_heads)
-        k_m = F.adaptive_avg_pool2d(k.reshape(B_*self.num_heads, window_size, window_size, self.dim//self.num_heads).permute(0, 3, 1, 2), output_size = (h, w)).permute(0, 2, 3, 1).reshape(B_, self.num_heads, num_landmarks, self.dim//self.num_heads)
+        q_m = nn.AvgPool2d(8, stride=8)(q2)
+        # print("Output shape for Adaptive Avg Pooling of Q:", q_m.shape)
+        q_m = q_m.permute(0, 2, 3, 1).reshape(B_, self.num_heads, num_landmarks, self.dim // self.num_heads)
+        # print("Q_m shape after reshape:", q_m.shape)
+        # q_m = F.adaptive_avg_pool2d(
+        #     q.reshape(B_ * self.num_heads, window_size, window_size, self.dim // self.num_heads).permute(0, 3, 1, 2),
+        #     output_size=(h, w)).permute(0, 2, 3, 1).reshape(B_, self.num_heads, num_landmarks,
+        #                                                     self.dim // self.num_heads)
+        
+        k2 = k.reshape(B_ * self.num_heads, window_size, window_size, self.dim // self.num_heads).permute(0, 3, 1, 2)
+        k_m = nn.AvgPool2d(8, stride=8)(k2)
+        k_m = k_m.permute(0, 2, 3, 1).reshape(B_, self.num_heads, num_landmarks,self.dim // self.num_heads)
+        
+        # k_m = F.adaptive_avg_pool2d(
+        #     k.reshape(B_ * self.num_heads, window_size, window_size, self.dim // self.num_heads).permute(0, 3, 1, 2),
+        #     output_size=(h, w)).permute(0, 2, 3, 1).reshape(B_, self.num_heads, num_landmarks,
+        #                                                     self.dim // self.num_heads)
 
         temp = self.activ(q_m @ k_m.transpose(-2, -1))
-        
-        pseudo_inv = self.moore_penrose_iter_pinv(temp, iters)
-        prod = (self.activ(q @ k_m.transpose(-2, -1)) @ pseudo_inv) @ (self.activ(q_m @ k.transpose(-2,-1)) @ torch.cat([v, torch.ones_like(v[..., :1])], dim=-1))
+
+        pseudo_inv = self.psuedo_inv(temp, iters)
+        prod = (self.activ(q @ k_m.transpose(-2, -1)) @ pseudo_inv) @ (
+                    self.activ(q_m @ k.transpose(-2, -1)) @ torch.cat([v, torch.ones_like(v[..., :1])], dim=-1))
 
         x = (prod[..., :-1] / (prod[..., -1].unsqueeze(-1) + 1e-12)).transpose(1, 2).reshape(B_, N, C)
         x = self.proj(x)
@@ -230,7 +246,6 @@ class PnPNystraAttention(nn.Module):
 
     def extra_repr(self) -> str:
         return f'dim={self.dim}, window_size={self.window_size}, num_heads={self.num_heads}'
-    
 
 
 class SwinTransformerBlock(nn.Module):
@@ -885,8 +900,8 @@ class SwinIR(nn.Module):
         H, W = x.shape[2:]
         x = self.check_image_size(x)
         
-        self.mean = self.mean.type_as(x)
-        x = (x - self.mean) * self.img_range
+        mean = self.mean.to(dtype=x.dtype, device=x.device)
+        x = (x - mean) * self.img_range
 
         if self.upsampler == 'pixelshuffle':
             # for classical SR
@@ -915,7 +930,7 @@ class SwinIR(nn.Module):
             res = self.conv_after_body(self.forward_features(x_first)) + x_first
             x = x + self.conv_last(res)
 
-        x = x / self.img_range + self.mean
+        x = x / self.img_range + mean
 
         return x[:, :, :H*self.upscale, :W*self.upscale]
 
@@ -937,16 +952,31 @@ if __name__ == '__main__':
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     height = (512 // upscale // window_size + 1) * window_size
     width = (512 // upscale // window_size + 1) * window_size
-    model = SwinIR(upscale=2, img_size=(height, width),
-                   window_size=window_size, img_range=1., depths=[6, 6, 6, 6],
-                   embed_dim=60, num_heads=[6, 6, 6, 6], mlp_ratio=2, upsampler='pixelshuffle').to(device)
+
+    # Initialize model
+    model = SwinIR(
+        mech="pnp_nystra",
+        num_landmarks=16,
+        iters=2,
+        upscale=upscale,
+        img_size=(height, width),
+        window_size=window_size,
+        img_range=1.,
+        depths=[6, 6, 6, 6, 6, 6],
+        embed_dim=180,
+        num_heads=[6, 6, 6, 6, 6, 6],
+        mlp_ratio=2,
+        upsampler='pixelshuffle'
+    ).to(device)
     print(height, width)
 
     times = []
     x = torch.randn((1, 3, height, width)).to(device)
-    for i in range(15):
-      t1 = time.time()
-      _ = model(x)
-      times.append(time.time()-t1)
+    # with torch.no_grad():
+    #     for i in range(5):
+    #       t1 = time.time()
+    #       _ = model(x)
+    #       times.append(time.time()-t1)
     print(x.shape)
-    print(np.mean(times[5:])*1000)
+    # print(_.shape)
+    print(np.mean(times)*1000)

@@ -2,3 +2,9 @@ test/
 pretrained_models/
 datasets/
 results/
+__pycache__/
+input_images/
+model_weights/
+*.engine
+*.onnx
+*.onnx.data
