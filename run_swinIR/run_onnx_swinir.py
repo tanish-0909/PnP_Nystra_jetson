@@ -81,7 +81,7 @@ def process(
         # Note: img_size is hardcoded to 224 now
         print(f"Building model for {imgname} with mech={mech}, window_size={window_size}, img_size=224")
 
-        model_ort_sess = define_model()
+        model_ort_sess = define_model(r"..\swinir_pnp2.onnx")
         inp_name = model_ort_sess.get_inputs()[0].name
         out_name = model_ort_sess.get_outputs()[0].name
 
@@ -157,8 +157,8 @@ def main():
                     ))
 
 
-def define_model():
-    ort_sess = ort.InferenceSession("swinir_pnp2.onnx", providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
+def define_model(model_path):
+    ort_sess = ort.InferenceSession(model_path, providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
 
     print(ort_sess.get_providers())
     inp_name = ort_sess.get_inputs()[0].name
