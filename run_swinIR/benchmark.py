@@ -9,17 +9,35 @@ import onnxruntime as ort
 import gc
 from run_onnx_swinir import define_model
 
-current_dir = os.path.dirname(os.path.abspath(__file__))
-# Get the parent directory's path
-parent_dir = os.path.dirname(current_dir)
-sys.path.insert(0, parent_dir)
+# Get absolute paths
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)  # PnP_Nystra/
+sys.path.insert(0, PROJECT_ROOT)
 
 from models.swinir import SwinIR as net
 
 
-def benchmark(model_type="TRT", input_image_dir=r"..\input_images", save_dir=r"..\results\swinIR", iterations=100, scale=2):
+def get_absolute_path(relative_path):
+    """Convert relative path to absolute from project root."""
+    relative_path = relative_path.replace('\\', os.sep).replace('/', os.sep)
+    relative_path = relative_path.lstrip('.').lstrip(os.sep).lstrip('.').lstrip(os.sep)
+    return os.path.join(PROJECT_ROOT, relative_path)
+
+
+def benchmark(model_type="TRT", input_image_dir=None, save_dir=None, iterations=100, scale=2):
     
-    save_dir += f"_{model_type}"
+    # Use absolute paths
+    if input_image_dir is None:
+        input_image_dir = get_absolute_path("input_images")
+    elif not os.path.isabs(input_image_dir):
+        input_image_dir = get_absolute_path(input_image_dir)
+    
+    if save_dir is None:
+        save_dir = get_absolute_path("results/swinIR")
+    elif not os.path.isabs(save_dir):
+        save_dir = get_absolute_path(save_dir)
+    
+    save_dir = f"{save_dir}_{model_type}"
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
     
@@ -31,21 +49,15 @@ def benchmark(model_type="TRT", input_image_dir=r"..\input_images", save_dir=r".
     out_name = None
 
     if model_type == "TRT":
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        # Get the parent directory's path
-        parent_dir = os.path.dirname(current_dir)
-        model_path = os.path.join(parent_dir, r"swinir_pnp_fp32.engine")
+        model_path = get_absolute_path("swinir_pnp_fp32.engine")
         trt_model = TRTWrapperTorch(model_path)
-        print("Loaded TRT model.")
+        print(f"Loaded TRT model from: {model_path}")
     elif model_type == "ONNX":
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        # Get the parent directory's path
-        parent_dir = os.path.dirname(current_dir)
-        model_path = os.path.join(parent_dir, r"swinir_pnp2.onnx")
+        model_path = get_absolute_path("swinir_pnp2.onnx")
         onnx_session = define_model(model_path)
         inp_name = onnx_session.get_inputs()[0].name
         out_name = onnx_session.get_outputs()[0].name
-        print("Loaded ONNX model.")
+        print(f"Loaded ONNX model from: {model_path}")
 
     else:
         model = net(
@@ -64,13 +76,10 @@ def benchmark(model_type="TRT", input_image_dir=r"..\input_images", save_dir=r".
             upsampler = 'pixelshuffle',
             resi_connection = '1conv'
         )
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        # Get the parent directory's path
-        parent_dir = os.path.dirname(current_dir)
-        model_path = os.path.join(parent_dir, r"model_weights\x2.pth")
+        model_path = get_absolute_path("model_weights/x2.pth")
         
-        # Load state dict
-        pretrained_model = torch.load(model_path)
+        # Load state dict (to CPU first to save memory)
+        pretrained_model = torch.load(model_path, map_location='cpu')
         param_key_g = 'params'
         state_dict = pretrained_model[param_key_g] if param_key_g in pretrained_model.keys() else pretrained_model
         

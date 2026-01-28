@@ -9,14 +9,23 @@ import torch
 import random
 random.seed(42)
 
-current_dir = os.path.dirname(os.path.abspath(__file__))
-# Get the parent directory's path
-parent_dir = os.path.dirname(current_dir)
-sys.path.insert(0, parent_dir)
+# Get absolute paths
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)  # PnP_Nystra/
+sys.path.insert(0, PROJECT_ROOT)
 
 from models.swinir import SwinIR as net
 from utils import swinir_utils as util
 from torchinfo import summary
+
+
+def get_absolute_path(relative_path):
+    """Convert relative path to absolute from project root."""
+    # Handle both forward and back slashes
+    relative_path = relative_path.replace('\\', os.sep).replace('/', os.sep)
+    # Remove leading dots and separators
+    relative_path = relative_path.lstrip('.').lstrip(os.sep).lstrip('.').lstrip(os.sep)
+    return os.path.join(PROJECT_ROOT, relative_path)
 
 def process_and_evaluate(
     args,
@@ -226,9 +235,9 @@ def main():
     parser.add_argument('--noise', type=int, default=15, help='noise level: 15, 25, 50')
     parser.add_argument('--jpeg', type=int, default=40, help='scale factor: 10, 20, 30, 40')
     parser.add_argument('--model_path', type=str,
-                        default=r".\model_weights\x2.pth")
-    parser.add_argument('--folder_lq', type=str, default=r".\input_images", help='input low-quality test image folder')
-    parser.add_argument('--folder_gt', type=str, default=r".\output_images", help='input ground-truth test image folder')
+                        default=None, help='Model weights path (default: model_weights/x2.pth)')
+    parser.add_argument('--folder_lq', type=str, default=None, help='input low-quality test image folder')
+    parser.add_argument('--folder_gt', type=str, default=None, help='input ground-truth test image folder')
     parser.add_argument('--tile', type=int, default=None, help='Tile size, None for no tile during testing (testing as a whole)')
     parser.add_argument('--tile_overlap', type=int, default=32, help='Overlapping of different tiles')
     parser.add_argument('--mech', type = str, default = 'original')
@@ -236,9 +245,27 @@ def main():
     parser.add_argument('--device', type = str, default = 'cuda', help='Device to run the model on, cuda or cpu')
 
     args = parser.parse_args()
+    
+    # Convert to absolute paths if not specified or relative
+    if args.model_path is None:
+        args.model_path = get_absolute_path("model_weights/x2.pth")
+    elif not os.path.isabs(args.model_path):
+        args.model_path = get_absolute_path(args.model_path)
+    
+    if args.folder_lq is None:
+        args.folder_lq = get_absolute_path("input_images")
+    elif not os.path.isabs(args.folder_lq):
+        args.folder_lq = get_absolute_path(args.folder_lq)
+    
+    if args.folder_gt is None:
+        args.folder_gt = get_absolute_path("output_images")
+    elif not os.path.isabs(args.folder_gt):
+        args.folder_gt = get_absolute_path(args.folder_gt)
 
     device = args.device
-    print("Using device: ", device)
+    print(f"Using device: {device}")
+    print(f"Model path: {args.model_path}")
+    print(f"Input folder: {args.folder_lq}")
     if args.mech == "original":
         for window_size in [32]:
             print(process(

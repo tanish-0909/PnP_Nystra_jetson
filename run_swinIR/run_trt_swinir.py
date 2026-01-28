@@ -12,14 +12,21 @@ from test_trt_model import run_pipeline
 import time
 random.seed(42)
 
-current_dir = os.path.dirname(os.path.abspath(__file__))
-# Get the parent directory's path
-parent_dir = os.path.dirname(current_dir)
-sys.path.insert(0, parent_dir)
+# Get absolute paths
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)  # PnP_Nystra/
+sys.path.insert(0, PROJECT_ROOT)
 
 from models.swinir import SwinIR as net
 from utils import swinir_utils as util
 from torchinfo import summary
+
+
+def get_absolute_path(relative_path):
+    """Convert relative path to absolute from project root."""
+    relative_path = relative_path.replace('\\', os.sep).replace('/', os.sep)
+    relative_path = relative_path.lstrip('.').lstrip(os.sep).lstrip('.').lstrip(os.sep)
+    return os.path.join(PROJECT_ROOT, relative_path)
 
 def process(
     args,
@@ -66,19 +73,37 @@ def main():
     parser.add_argument('--noise', type=int, default=15, help='noise level: 15, 25, 50')
     parser.add_argument('--jpeg', type=int, default=40, help='scale factor: 10, 20, 30, 40')
     parser.add_argument('--model_path', type=str,
-                        default=r"..\model_weights\x2.pth")
-    parser.add_argument('--folder_lq', type=str, default=r"..\input_images", help='input low-quality test image folder')
+                        default=None, help='Model weights path')
+    parser.add_argument('--folder_lq', type=str, default=None, help='input low-quality test image folder')
     parser.add_argument('--tile', type=int, default=None, help='Tile size, None for no tile during testing (testing as a whole)')
     parser.add_argument('--tile_overlap', type=int, default=32, help='Overlapping of different tiles')
-    parser.add_argument('--mech', type = str, default = 'pnp_nystra')
+    parser.add_argument('--mech', type=str, default='pnp_nystra')
     parser.add_argument('--sample_k', type=int, default=None, help='If not None, randomly sample `sample_k` images from the folder')
-    parser.add_argument('--device', type = str, default = 'cuda', help='Device to run the model on, cuda or cpu')
-    parser.add_argument('--engine_path', type = str, default = r"..\swinir_pnp.engine", help='Path to the TensorRT engine file')
+    parser.add_argument('--device', type=str, default='cuda', help='Device to run the model on, cuda or cpu')
+    parser.add_argument('--engine_path', type=str, default=None, help='Path to the TensorRT engine file')
 
     args = parser.parse_args()
+    
+    # Convert to absolute paths
+    if args.model_path is None:
+        args.model_path = get_absolute_path("model_weights/x2.pth")
+    elif not os.path.isabs(args.model_path):
+        args.model_path = get_absolute_path(args.model_path)
+    
+    if args.folder_lq is None:
+        args.folder_lq = get_absolute_path("input_images")
+    elif not os.path.isabs(args.folder_lq):
+        args.folder_lq = get_absolute_path(args.folder_lq)
+    
+    if args.engine_path is None:
+        args.engine_path = get_absolute_path("swinir_pnp_fp32.engine")
+    elif not os.path.isabs(args.engine_path):
+        args.engine_path = get_absolute_path(args.engine_path)
 
     device = args.device
-    print("Using device: ", device)
+    print(f"Using device: {device}")
+    print(f"Engine path: {args.engine_path}")
+    print(f"Input folder: {args.folder_lq}")
     if args.mech == "original":
         for window_size in [32]:
             print(process(
@@ -110,7 +135,7 @@ def main():
 
 
 def setup(args, window_size):
-    save_dir = f'../results/swinir_x{args.scale}'
+    save_dir = get_absolute_path(f'results/swinir_x{args.scale}')
     folder = args.folder_lq
     border = args.scale
     window_size = window_size

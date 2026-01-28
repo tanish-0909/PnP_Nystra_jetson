@@ -4,6 +4,18 @@ import torch
 import tensorrt as trt
 import os
 import time
+import sys
+
+# Get absolute paths
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)  # PnP_Nystra/
+
+
+def get_absolute_path(relative_path):
+    """Convert relative path to absolute from project root."""
+    relative_path = relative_path.replace('\\', os.sep).replace('/', os.sep)
+    relative_path = relative_path.lstrip('.').lstrip(os.sep).lstrip('.').lstrip(os.sep)
+    return os.path.join(PROJECT_ROOT, relative_path)
 
 class TRTWrapperTorch:
     def __init__(self, engine_path):
@@ -126,9 +138,41 @@ def run_pipeline(image_path, engine_path, save_dir, scale=2):
     print(f"Saved: {save_path}")
 
 if __name__ == "__main__":
-    # Update paths here
-    IMG_PATH = r"D:\TensorRT_ISR2.0\pythonProject\PnP_Nystra\input_images\Screenshot 2026-01-08 215234.png"
-    ENGINE_PATH = r"D:\TensorRT_ISR2.0\pythonProject\PnP_Nystra\swinir_pnp_fp32.engine"
-    SAVE_DIR = r"D:\TensorRT_ISR2.0\pythonProject\PnP_Nystra\results\swinir_x2"
+    import argparse
     
-    run_pipeline(IMG_PATH, ENGINE_PATH, SAVE_DIR, scale=2)
+    parser = argparse.ArgumentParser(description="Test TRT model")
+    parser.add_argument('--image', type=str, default=None, help='Input image path')
+    parser.add_argument('--engine', type=str, default=None, help='TensorRT engine path')
+    parser.add_argument('--output', type=str, default=None, help='Output directory')
+    parser.add_argument('--scale', type=int, default=2, help='Upscale factor')
+    
+    args = parser.parse_args()
+    
+    # Set defaults with absolute paths
+    if args.image is None:
+        # Find first image in input_images
+        input_dir = get_absolute_path("input_images")
+        images = [f for f in os.listdir(input_dir) if os.path.isfile(os.path.join(input_dir, f))]
+        if images:
+            args.image = os.path.join(input_dir, images[0])
+        else:
+            print("No images found in input_images/")
+            sys.exit(1)
+    elif not os.path.isabs(args.image):
+        args.image = get_absolute_path(args.image)
+    
+    if args.engine is None:
+        args.engine = get_absolute_path("swinir_pnp_fp32.engine")
+    elif not os.path.isabs(args.engine):
+        args.engine = get_absolute_path(args.engine)
+    
+    if args.output is None:
+        args.output = get_absolute_path("results/swinir_x2")
+    elif not os.path.isabs(args.output):
+        args.output = get_absolute_path(args.output)
+    
+    print(f"Image path: {args.image}")
+    print(f"Engine path: {args.engine}")
+    print(f"Output dir: {args.output}")
+    
+    run_pipeline(args.image, args.engine, args.output, scale=args.scale)
